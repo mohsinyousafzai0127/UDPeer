@@ -1,15 +1,23 @@
-"""main.py - command line. Owner: Shahab.
+"""main.py - command line of one peer.  Owner: Shahab.
 
 Run:  python main.py <my_id> <my_port> [bootstrap_ip:port]
-Ex:   python main.py 1 5000
-      python main.py 2 5001 127.0.0.1:5000
+Ex:   python main.py 1 5000                    (first peer)
+      python main.py 2 5001 127.0.0.1:5000     (joins through peer 1)
 """
 import sys
 
 import chat
 import peers
 import protocol
-from reliable import ReliableChannel
+import reliable
+from node import Node
+
+HELP = """commands:
+  peers             list the peers I know
+  chat <text>       send a message to the whole group
+  loss <0..1>       simulate packet loss, e.g. loss 0.3
+  help              this text
+  leave             leave the group and quit"""
 
 
 def main():
@@ -17,33 +25,36 @@ def main():
         print(__doc__)
         return
     my_id, port = int(sys.argv[1]), int(sys.argv[2])
-    bootstrap = None
+    node = Node(my_id, port)
+    node.start()
     if len(sys.argv) > 3:
         ip, p = sys.argv[3].split(":")
-        bootstrap = (ip, int(p))
+        peers.join(node, (ip, int(p)))
+    print(f"peer {my_id} listening on UDP {port}.  Type 'help'.")
 
-    table = peers.PeerTable()
-
-    def on_message(msg_type, sender_id, payload, addr):
-        if msg_type == protocol.CHAT:
-            chat.on_chat(sender_id, payload)
-        # TODO: JOIN, WELCOME, HEARTBEAT, LEAVE, CHUNK_REQUEST ...
-
-    channel = ReliableChannel(my_id, port, on_message)
-    channel.start()
-    if bootstrap:
-        peers.join(channel, table, bootstrap)
-
-    print("Commands: peers | chat <text> | files | download <file> | leave")
-    while True:
-        line = input("> ").strip()
-        if line == "peers":
-            print(table.get_peers())
-        elif line.startswith("chat "):
-            chat.send_chat(channel, table, line[5:])
-        elif line == "leave":
-            break  # TODO send LEAVE to everyone
-    channel.stop()
+    while node.running:
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            line = "leave"
+        cmd, _, rest = line.partition(" ")
+        try:
+            if cmd == "peers":
+                print(node.table.get_peers())
+            elif cmd == "chat" and rest:
+                if chat.send_chat(node, rest) == 0:
+                    print("(no peers yet)")
+            elif cmd == "loss":
+                protocol.LOSS = float(rest)
+                print("packet loss =", protocol.LOSS)
+            elif cmd == "leave":
+                peers.leave(node)
+            elif cmd == "help":
+                print(HELP)
+            elif cmd:
+                print("unknown command, type 'help'")
+        except Exception as e:
+            print("error:", e)
 
 
 if __name__ == "__main__":
