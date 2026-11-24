@@ -8,6 +8,8 @@ Chunk transfer protocol:
   only then accepts the chunk.
 """
 import hashlib
+import os
+import queue
 import threading
 import time
 
@@ -111,3 +113,55 @@ def fetch_chunk_from_group(node, manifest, chunk_id, first=0, rounds=ROUNDS):
         if attempt < rounds - 1:
             time.sleep(1)
     return None, None
+
+
+# ------------------------------------------------------------------ multi-source download
+def download_file(node, manifest, workers=4, use_local=True):
+    """Download a whole shared file. Several worker threads fetch different chunks at the
+    same time, from different peers. Returns the saved path, or None on failure."""
+    t0 = time.time()
+    n = len(manifest["chunk_hashes"])
+    todo = queue.Queue()
+    for c in range(n):
+        todo.put(c)
+    chunks, sources = {}, {}
+    lock = threading.Lock()
+
+    def worker():
+        while True:
+            try:
+                c = todo.get_nowait()
+            except queue.Empty:
+                return
+            data = node.store.get_chunk(manifest["file_id"], c) if use_local else None
+            src = node.my_id
+            if data is None:
+                src, data = fetch_chunk_from_group(node, manifest, c, first=c)
+            if data is None:
+                continue                                # all replicas failed: chunk stays missing
+            with lock:
+                chunks[c] = data
+                sources[src] = sources.get(src, 0) + 1
+                if len(chunks) % 8 == 0 or len(chunks) == n:
+                    print(f"  downloaded {len(chunks)}/{n} chunks")
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    missing = [c for c in range(n) if c not in chunks]
+    if missing:
+        print(f"download of {manifest['name']} FAILED, missing chunks: {missing}")
+        return None
+    data = b"".join(chunks[c] for c in range(n))
+    if hashlib.sha256(data).hexdigest() != manifest["sha256"]:
+        print(f"download of {manifest['name']} FAILED: file hash mismatch")
+        return None
+    path = os.path.join(node.store.download_dir, manifest["name"])
+    with open(path, "wb") as f:
+        f.write(data)
+    print(f"download complete: {path} ({len(data)} bytes, {time.time() - t0:.1f}s, "
+          f"integrity OK, chunks per peer: {dict(sorted(sources.items()))})")
+    return path
